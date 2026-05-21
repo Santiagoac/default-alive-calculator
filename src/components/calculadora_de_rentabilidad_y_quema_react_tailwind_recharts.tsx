@@ -242,23 +242,29 @@ export default function GrowthBurnCalculator() {
                   step={10000}
                 />
                 <div className="grid grid-cols-1 gap-3">
-                  <SliderField
-                    label={`Crecimiento por periodo (${periodicity})`}
-                    value={growth}
-                    onChange={setGrowth}
+                  <DualRateField
+                    label={`Crecimiento por periodo (${periodicity === "monthly" ? "mensual" : "semanal"})`}
+                    rate={growth}
+                    onRateChange={setGrowth}
+                    mrr={mrr}
+                    absLabel="Nuevo MRR"
+                    perPeriodLabel={periodicity === "monthly" ? "mes" : "semana"}
+                    currency={ccy}
                     min={-0.5}
                     max={0.5}
                     step={0.005}
-                    format={(v) => pct(v)}
                   />
-                  <SliderField
+                  <DualRateField
                     label="Churn mensual"
-                    value={churn}
-                    onChange={setChurn}
+                    rate={churn}
+                    onRateChange={setChurn}
+                    mrr={mrr}
+                    absLabel="MRR perdido"
+                    perPeriodLabel="mes"
+                    currency={ccy}
                     min={0}
                     max={0.5}
                     step={0.005}
-                    format={(v) => pct(v)}
                   />
                 </div>
 
@@ -462,6 +468,7 @@ export default function GrowthBurnCalculator() {
             <li>El capital requerido es la suma de déficits mensuales hasta alcanzar o no el break-even dentro del horizonte.</li>
             <li>Si cambias a periodicidad semanal, la tasa por periodo se compone a mensual usando 4.345 semanas/mes.</li>
             <li>Puedes poner crecimiento negativo para simular contracciones.</li>
+            <li>"Nuevo MRR" y "MRR perdido" son snapshots al MRR actual: como el modelo compone, estos montos absolutos crecen mes a mes aunque la tasa % se mantenga constante.</li>
           </ul>
         </Card>
       </div>
@@ -642,6 +649,88 @@ function SliderField({ label, value, onChange, min, max, step, format = (v: numb
         className="w-full"
       />
     </label>
+  );
+}
+
+function DualRateField({
+  label,
+  rate,
+  onRateChange,
+  mrr,
+  absLabel,
+  perPeriodLabel,
+  currency,
+  min,
+  max,
+  step,
+}: {
+  label: string;
+  rate: number;
+  onRateChange: (v: number) => void;
+  mrr: number;
+  absLabel: string;
+  perPeriodLabel: string;
+  currency: string;
+  min: number;
+  max: number;
+  step: number;
+}) {
+  const symbol = currency === "EUR" ? "€" : "$";
+  const absValue = mrr * rate;
+  const formatAbs = (v: number) => `${v < 0 ? "-" : ""}${symbol}${Math.abs(Math.round(v)).toLocaleString()}`;
+
+  const [isFocused, setIsFocused] = React.useState(false);
+  const [displayValue, setDisplayValue] = React.useState(formatAbs(absValue));
+
+  React.useEffect(() => {
+    if (!isFocused) setDisplayValue(formatAbs(absValue));
+  }, [absValue, currency, isFocused]);
+
+  const handleAbsInput = (raw: string) => {
+    setDisplayValue(raw);
+    const cleaned = raw.replace(/[^0-9-]/g, "").replace(/(?!^)-/g, "");
+    const num = cleaned === "" || cleaned === "-" ? 0 : Number(cleaned);
+    if (mrr > 0) {
+      const newRate = Math.max(min, Math.min(max, num / mrr));
+      onRateChange(newRate);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center justify-between text-sm text-gray-600">
+        <span>{label}</span>
+        <span className="font-medium text-gray-800">{pct(rate)}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={rate}
+        onChange={(e) => onRateChange(Number(e.target.value))}
+        className="w-full"
+      />
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-gray-500 whitespace-nowrap">{absLabel}/{perPeriodLabel}</span>
+        <input
+          type="text"
+          inputMode="numeric"
+          className="border rounded-lg px-2 py-1 text-sm w-full focus:outline-none focus:ring disabled:bg-gray-50 disabled:text-gray-400"
+          value={displayValue}
+          disabled={mrr <= 0}
+          onChange={(e) => handleAbsInput(e.target.value)}
+          onFocus={() => {
+            setIsFocused(true);
+            setDisplayValue(String(Math.round(absValue)));
+          }}
+          onBlur={() => {
+            setIsFocused(false);
+            setDisplayValue(formatAbs(mrr * rate));
+          }}
+        />
+      </div>
+    </div>
   );
 }
 
