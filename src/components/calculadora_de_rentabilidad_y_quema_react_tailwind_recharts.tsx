@@ -4,14 +4,16 @@ import {
   ResponsiveContainer,
   AreaChart,
   Area,
+  ComposedChart,
+  Line,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip,
   ReferenceLine,
-  Legend,
+  ReferenceDot,
 } from "recharts";
-import { TrendingUp, PiggyBank, Flame, RefreshCw, X } from "lucide-react";
+import { TrendingUp, PiggyBank, RefreshCw, Wallet, CheckCircle2, AlertTriangle } from "lucide-react";
 
 /**
  * Calculadora de rentabilidad y quema
@@ -84,10 +86,6 @@ export default function GrowthBurnCalculator() {
   const [cash, setCash] = useState(1500000); // caja inicial
   const [monthsHorizon, setMonthsHorizon] = useState(24);
   const [ccy, setCcy] = useState("MXN");
-  const [activePayload, setActivePayload] = useState<any[] | null>(null);
-  const [activeLabel, setActiveLabel] = useState<string | null>(null);
-  const [selectedPayload, setSelectedPayload] = useState<any[] | null>(null);
-  const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
 
   // Normaliza tasas si el usuario cambia periodicidad
   const periodToMonthFactor = periodicity === "weekly" ? 4.34524 : 1; // semanas ≈ 4.345 por mes
@@ -113,12 +111,20 @@ export default function GrowthBurnCalculator() {
       cumulativeDeficit += deficit;
       if (breakEvenMonth === null && revenue >= expenses) breakEvenMonth = m;
 
+      const cashBalance = cash - cumulativeDeficit;
+      const deficitArea = expenses > revenue ? [revenue, expenses] : null;
+      const surplusArea = revenue > expenses ? [expenses, revenue] : null;
+
       data.push({
         month: monthLabel,
+        monthIndex: m,
         revenue,
         expenses,
         deficit,
         cumulativeDeficit,
+        cashBalance,
+        deficitArea,
+        surplusArea,
       });
 
       // siguiente mes: revenue crece por growth neto (crecimiento - churn)
@@ -126,51 +132,31 @@ export default function GrowthBurnCalculator() {
       revenue = revenue * (1 + netGrowth);
     }
 
+    let minCash = { value: data[0].cashBalance, month: 0 };
+    for (const d of data) {
+      if (d.cashBalance < minCash.value) {
+        minCash = { value: d.cashBalance, month: d.monthIndex };
+      }
+    }
+
     return {
       data,
       breakEvenMonth,
       totalDeficit: data[data.length - 1].cumulativeDeficit,
+      minCash,
     };
-  }, [mrr, effMonthlyGrowth, effMonthlyChurn, expenses, monthsHorizon]);
+  }, [mrr, effMonthlyGrowth, effMonthlyChurn, expenses, monthsHorizon, cash]);
 
   const neededCapital = series.data.reduce((acc, d) => acc + d.deficit, 0);
-  const defaultAlive = cash >= neededCapital;
+  const defaultAlive = cash >= neededCapital && series.breakEvenMonth !== null;
+  const margin = cash - neededCapital;
+  const cashTrajectoryColor = series.minCash.value < 0 ? "#ef4444" : "#10b981";
+  const cashTrajectoryFillId = series.minCash.value < 0 ? "cashNeg" : "cashPos";
 
-  // Función para manejar click en etiquetas del eje X
-  const handleTickClick = React.useCallback((tickValue: string) => {
-    const monthData = series.data.find(d => d.month === tickValue);
-    if (monthData) {
-      const payload = [
-        { dataKey: 'revenue', value: monthData.revenue, color: '#3b82f6' },
-        { dataKey: 'expenses', value: monthData.expenses, color: '#ef4444' },
-        { dataKey: 'deficit', value: monthData.deficit, color: '#10b981' },
-        { dataKey: 'cumulativeDeficit', value: monthData.cumulativeDeficit, color: '#10b981' }
-      ];
-      setSelectedPayload(payload);
-      setSelectedLabel(tickValue);
-    }
-  }, [series.data, ccy]);
-
-  // Componente personalizado para las etiquetas del eje X
-  const CustomTick = React.useCallback((props: any) => {
-    const { x, y, payload } = props;
-    return (
-      <g>
-        <text 
-          x={x} 
-          y={y} 
-          dy={16} 
-          textAnchor="middle" 
-          fill="#666" 
-          fontSize="12"
-          className="cursor-pointer hover:fill-blue-600 hover:font-medium transition-colors"
-          onClick={() => handleTickClick(payload.value)}
-        >
-          {payload.value}
-        </text>
-      </g>
-    );
-  }, [handleTickClick]);
+  const tooltipFormatter = (value: any, name: any) => {
+    if (typeof value !== "number") return [value, name];
+    return [formatCurrencyAbbrev(value, ccy), name];
+  };
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 p-0 md:p-8">
@@ -256,23 +242,29 @@ export default function GrowthBurnCalculator() {
                   step={10000}
                 />
                 <div className="grid grid-cols-1 gap-3">
-                  <SliderField
-                    label={`Crecimiento por periodo (${periodicity})`}
-                    value={growth}
-                    onChange={setGrowth}
+                  <DualRateField
+                    label={`Crecimiento por periodo (${periodicity === "monthly" ? "mensual" : "semanal"})`}
+                    rate={growth}
+                    onRateChange={setGrowth}
+                    mrr={mrr}
+                    absLabel="Nuevo MRR"
+                    perPeriodLabel={periodicity === "monthly" ? "mes" : "semana"}
+                    currency={ccy}
                     min={-0.5}
                     max={0.5}
                     step={0.005}
-                    format={(v) => pct(v)}
                   />
-                  <SliderField
+                  <DualRateField
                     label="Churn mensual"
-                    value={churn}
-                    onChange={setChurn}
+                    rate={churn}
+                    onRateChange={setChurn}
+                    mrr={mrr}
+                    absLabel="MRR perdido"
+                    perPeriodLabel="mes"
+                    currency={ccy}
                     min={0}
                     max={0.5}
                     step={0.005}
-                    format={(v) => pct(v)}
                   />
                 </div>
 
@@ -289,149 +281,182 @@ export default function GrowthBurnCalculator() {
             </Card>
           </div>
 
-          {/* Métricas */}
+          {/* Métricas y gráficas */}
           <div className="md:col-span-7 space-y-4">
+            <DefaultAliveBanner
+              defaultAlive={defaultAlive}
+              margin={margin}
+              breakEvenMonth={series.breakEvenMonth}
+              monthsHorizon={monthsHorizon}
+              ccy={ccy}
+            />
+
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <KPI
-                icon={<PiggyBank className="w-5 h-5" />}
-                label="Capital requerido (hasta break-even)"
-                value={formatCurrencyAbbrev(neededCapital, ccy)}
-              />
               <KPI
                 icon={<TrendingUp className="w-5 h-5" />}
                 label="Mes de break-even"
-                value={series.breakEvenMonth !== null ? `M${series.breakEvenMonth}` : "No en horizonte"}
+                value={
+                  series.breakEvenMonth !== null
+                    ? `M${series.breakEvenMonth}`
+                    : `> ${monthsHorizon}m`
+                }
               />
               <KPI
-                icon={<Flame className="w-5 h-5" />}
-                label="Default alive"
-                value={defaultAlive ? "Sí" : "No"}
-                className={defaultAlive ? "text-emerald-600" : "text-rose-600"}
+                icon={<PiggyBank className="w-5 h-5" />}
+                label="Capital requerido"
+                value={formatCurrencyAbbrev(neededCapital, ccy)}
+              />
+              <KPI
+                icon={<Wallet className="w-5 h-5" />}
+                label="Caja mínima proyectada"
+                value={formatCurrencyAbbrev(series.minCash.value, ccy)}
+                subValue={`en M${series.minCash.month}`}
+                className={series.minCash.value < 0 ? "text-rose-600" : ""}
               />
             </div>
 
-            <Card className="h-[420px]">
-              <div className="text-sm text-gray-600 mb-2">
-                Ingresos vs gastos y déficit acumulado
+            <Card>
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-sm font-medium text-gray-900">Ingresos vs Gastos</div>
+                <ChartLegend
+                  items={[
+                    { color: "#3b82f6", label: "Ingresos" },
+                    { color: "#ef4444", label: "Gastos" },
+                    { color: "#fecaca", label: "Déficit" },
+                    { color: "#bbf7d0", label: "Superávit" },
+                  ]}
+                />
               </div>
-              <ResponsiveContainer width="100%" height="90%">
-                <AreaChart 
-                  data={series.data} 
-                  margin={{ top: 10, right: 20, left: 0, bottom: 0 }}
-                  onMouseMove={(state) => {
-                    if (state && state.activePayload && state.activeLabel) {
-                      setActivePayload(state.activePayload);
-                      setActiveLabel(state.activeLabel);
-                    }
-                  }}
-                  onMouseLeave={() => {
-                    setActivePayload(null);
-                    setActiveLabel(null);
-                  }}
-                >
-                  <defs>
-                    <linearGradient id="rev" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#60a5fa" stopOpacity={0.8} />
-                      <stop offset="100%" stopColor="#60a5fa" stopOpacity={0.2} />
-                    </linearGradient>
-                    <linearGradient id="exp" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#f87171" stopOpacity={0.7} />
-                      <stop offset="100%" stopColor="#f87171" stopOpacity={0.2} />
-                    </linearGradient>
-                    <linearGradient id="cum" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#34d399" stopOpacity={0.8} />
-                      <stop offset="100%" stopColor="#34d399" stopOpacity={0.2} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="month" tick={CustomTick} />
-                  <YAxis tickFormatter={(v) => formatNumberAbbrev(v)} width={60} />
-                  {series.breakEvenMonth !== null && (
-                    <ReferenceLine
-                      x={`M${series.breakEvenMonth}`}
-                      stroke="#10b981"
-                      strokeDasharray="4 4"
-                      label={{ value: "Break-even", position: "insideTop" }}
+              <div className="h-[260px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={series.data} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="month" />
+                    <YAxis tickFormatter={(v) => formatNumberAbbrev(v)} width={60} />
+                    <Tooltip
+                      formatter={tooltipFormatter}
+                      labelFormatter={(label) => `Mes ${label}`}
                     />
-                  )}
-                  <Legend />
-                  <Area type="monotone" dataKey="revenue" name="Ingresos" stroke="#3b82f6" fill="url(#rev)" />
-                  <Area type="monotone" dataKey="expenses" name="Gastos" stroke="#ef4444" fill="url(#exp)" />
-                  <Area type="monotone" dataKey="cumulativeDeficit" name="Déficit acumulado" stroke="#10b981" fill="url(#cum)" />
-                </AreaChart>
-              </ResponsiveContainer>
-              
-              {/* Contenedor dinámico para detalles del gráfico */}
-              {activePayload && activeLabel && (
-                <div className="mt-2 p-3 bg-gray-50 rounded-xl border">
-                  <div className="text-sm font-medium text-gray-900 mb-2">{activeLabel}</div>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
-                    {activePayload.map((entry: any, index: number) => {
-                      const labels: { [key: string]: string } = {
-                        revenue: "Ingresos",
-                        expenses: "Gastos", 
-                        deficit: "Déficit",
-                        cumulativeDeficit: "Déficit acumulado"
-                      };
-                      
-                      if (labels[entry.dataKey]) {
-                        return (
-                          <div key={index} className="flex flex-col">
-                            <span className="text-gray-600">{labels[entry.dataKey]}</span>
-                            <span className="font-medium" style={{ color: entry.color }}>
-                              {formatCurrencyAbbrev(entry.value, ccy)}
-                            </span>
-                          </div>
-                        );
-                      }
-                      return null;
-                    })}
-                  </div>
-                </div>
-              )}
+                    {series.breakEvenMonth !== null && (
+                      <ReferenceLine
+                        x={`M${series.breakEvenMonth}`}
+                        stroke="#10b981"
+                        strokeDasharray="4 4"
+                        label={{
+                          value: `Break-even M${series.breakEvenMonth}`,
+                          position: "insideTopRight",
+                          fill: "#10b981",
+                          fontSize: 12,
+                        }}
+                      />
+                    )}
+                    <Area
+                      type="monotone"
+                      dataKey="deficitArea"
+                      name="Déficit"
+                      stroke="none"
+                      fill="#fecaca"
+                      fillOpacity={0.7}
+                      isAnimationActive={false}
+                      activeDot={false}
+                      legendType="none"
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="surplusArea"
+                      name="Superávit"
+                      stroke="none"
+                      fill="#bbf7d0"
+                      fillOpacity={0.7}
+                      isAnimationActive={false}
+                      activeDot={false}
+                      legendType="none"
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="revenue"
+                      name="Ingresos"
+                      stroke="#3b82f6"
+                      strokeWidth={2}
+                      dot={false}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="expenses"
+                      name="Gastos"
+                      stroke="#ef4444"
+                      strokeWidth={2}
+                      dot={false}
+                    />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </div>
             </Card>
-            
-            {/* Contenedor de detalles seleccionados */}
-            {selectedPayload && selectedLabel && (
-              <Card>
-                <div className="flex items-center justify-between mb-3">
-                  <div className="text-sm font-medium text-gray-900">
-                    Detalles de {selectedLabel}
-                  </div>
-                  <button
-                    onClick={() => {
-                      setSelectedPayload(null);
-                      setSelectedLabel(null);
-                    }}
-                    className="p-1 hover:bg-gray-100 rounded-lg transition-colors"
-                  >
-                    <X className="w-4 h-4 text-gray-500" />
-                  </button>
-                </div>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  {selectedPayload.map((entry: any, index: number) => {
-                    const labels: { [key: string]: string } = {
-                      revenue: "Ingresos",
-                      expenses: "Gastos", 
-                      deficit: "Déficit",
-                      cumulativeDeficit: "Déficit acumulado"
-                    };
-                    
-                    if (labels[entry.dataKey]) {
-                      return (
-                        <div key={index} className="flex flex-col p-3 bg-gray-50 rounded-xl">
-                          <span className="text-xs text-gray-600 mb-1">{labels[entry.dataKey]}</span>
-                          <span className="text-sm font-semibold" style={{ color: entry.color }}>
-                            {formatCurrencyAbbrev(entry.value, ccy)}
-                          </span>
-                        </div>
-                      );
-                    }
-                    return null;
-                  })}
-                </div>
-              </Card>
-            )}
+
+            <Card>
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-sm font-medium text-gray-900">Trayectoria de la caja</div>
+                <ChartLegend
+                  items={[
+                    { color: cashTrajectoryColor, label: "Caja proyectada" },
+                    { color: "#9ca3af", label: "Línea de peligro (0)" },
+                  ]}
+                />
+              </div>
+              <div className="h-[240px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={series.data} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="cashPos" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#10b981" stopOpacity={0.6} />
+                        <stop offset="100%" stopColor="#10b981" stopOpacity={0.05} />
+                      </linearGradient>
+                      <linearGradient id="cashNeg" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#ef4444" stopOpacity={0.6} />
+                        <stop offset="100%" stopColor="#ef4444" stopOpacity={0.05} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="month" />
+                    <YAxis tickFormatter={(v) => formatNumberAbbrev(v)} width={60} />
+                    <Tooltip
+                      formatter={(v: any) => formatCurrencyAbbrev(v as number, ccy)}
+                      labelFormatter={(label) => `Mes ${label}`}
+                    />
+                    <ReferenceLine y={0} stroke="#9ca3af" strokeDasharray="4 4" />
+                    {series.breakEvenMonth !== null && (
+                      <ReferenceLine
+                        x={`M${series.breakEvenMonth}`}
+                        stroke="#10b981"
+                        strokeDasharray="4 4"
+                      />
+                    )}
+                    <Area
+                      type="monotone"
+                      dataKey="cashBalance"
+                      name="Caja"
+                      stroke={cashTrajectoryColor}
+                      fill={`url(#${cashTrajectoryFillId})`}
+                      strokeWidth={2}
+                    />
+                    <ReferenceDot
+                      x={`M${series.minCash.month}`}
+                      y={series.minCash.value}
+                      r={5}
+                      fill={cashTrajectoryColor}
+                      stroke="#fff"
+                      strokeWidth={2}
+                      label={{
+                        value: "Caja mínima",
+                        position: series.minCash.value < 0 ? "top" : "bottom",
+                        fill: cashTrajectoryColor,
+                        fontSize: 11,
+                      }}
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            </Card>
           </div>
         </section>
 
@@ -443,6 +468,7 @@ export default function GrowthBurnCalculator() {
             <li>El capital requerido es la suma de déficits mensuales hasta alcanzar o no el break-even dentro del horizonte.</li>
             <li>Si cambias a periodicidad semanal, la tasa por periodo se compone a mensual usando 4.345 semanas/mes.</li>
             <li>Puedes poner crecimiento negativo para simular contracciones.</li>
+            <li>"Nuevo MRR" y "MRR perdido" son snapshots al MRR actual: como el modelo compone, estos montos absolutos crecen mes a mes aunque la tasa % se mantenga constante.</li>
           </ul>
         </Card>
       </div>
@@ -456,11 +482,80 @@ function Card({ children, className = "" }: { children: React.ReactNode; classNa
   );
 }
 
-function KPI({ icon, label, value, className = "" }: { icon: React.ReactNode; label: string; value: string; className?: string }) {
+function KPI({ icon, label, value, subValue, className = "" }: { icon: React.ReactNode; label: string; value: string; subValue?: string; className?: string }) {
   return (
     <div className={`bg-white border shadow-sm rounded-2xl p-4 flex flex-col gap-1 ${className}`}>
       <div className="text-xs text-gray-500 flex items-center gap-2">{icon}<span>{label}</span></div>
       <div className="text-lg md:text-xl font-semibold">{value}</div>
+      {subValue && <div className="text-xs text-gray-500">{subValue}</div>}
+    </div>
+  );
+}
+
+function ChartLegend({ items }: { items: { color: string; label: string }[] }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-600">
+      {items.map((item) => (
+        <div key={item.label} className="flex items-center gap-1.5">
+          <span
+            className="inline-block w-3 h-3 rounded-sm"
+            style={{ backgroundColor: item.color }}
+          />
+          <span>{item.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function DefaultAliveBanner({
+  defaultAlive,
+  margin,
+  breakEvenMonth,
+  monthsHorizon,
+  ccy,
+}: {
+  defaultAlive: boolean;
+  margin: number;
+  breakEvenMonth: number | null;
+  monthsHorizon: number;
+  ccy: string;
+}) {
+  const noBreakEven = breakEvenMonth === null;
+
+  const tone = defaultAlive
+    ? {
+        bg: "bg-emerald-50 border-emerald-200",
+        text: "text-emerald-700",
+        iconBg: "bg-emerald-100",
+        title: "Default alive",
+      }
+    : {
+        bg: "bg-rose-50 border-rose-200",
+        text: "text-rose-700",
+        iconBg: "bg-rose-100",
+        title: "Default dead",
+      };
+
+  const subtitle = noBreakEven
+    ? `No alcanzas break-even en ${monthsHorizon} meses al ritmo actual.`
+    : defaultAlive
+      ? `Te sobran ${formatCurrencyAbbrev(margin, ccy)} sobre el capital requerido.`
+      : `Te faltan ${formatCurrencyAbbrev(Math.abs(margin), ccy)} para llegar al break-even.`;
+
+  return (
+    <div className={`border rounded-2xl p-4 flex items-center gap-4 ${tone.bg}`}>
+      <div className={`rounded-full p-3 ${tone.iconBg}`}>
+        {defaultAlive ? (
+          <CheckCircle2 className={`w-6 h-6 ${tone.text}`} />
+        ) : (
+          <AlertTriangle className={`w-6 h-6 ${tone.text}`} />
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className={`text-lg md:text-xl font-semibold ${tone.text}`}>{tone.title}</div>
+        <div className="text-sm text-gray-700">{subtitle}</div>
+      </div>
     </div>
   );
 }
@@ -554,6 +649,88 @@ function SliderField({ label, value, onChange, min, max, step, format = (v: numb
         className="w-full"
       />
     </label>
+  );
+}
+
+function DualRateField({
+  label,
+  rate,
+  onRateChange,
+  mrr,
+  absLabel,
+  perPeriodLabel,
+  currency,
+  min,
+  max,
+  step,
+}: {
+  label: string;
+  rate: number;
+  onRateChange: (v: number) => void;
+  mrr: number;
+  absLabel: string;
+  perPeriodLabel: string;
+  currency: string;
+  min: number;
+  max: number;
+  step: number;
+}) {
+  const symbol = currency === "EUR" ? "€" : "$";
+  const absValue = mrr * rate;
+  const formatAbs = (v: number) => `${v < 0 ? "-" : ""}${symbol}${Math.abs(Math.round(v)).toLocaleString()}`;
+
+  const [isFocused, setIsFocused] = React.useState(false);
+  const [displayValue, setDisplayValue] = React.useState(formatAbs(absValue));
+
+  React.useEffect(() => {
+    if (!isFocused) setDisplayValue(formatAbs(absValue));
+  }, [absValue, currency, isFocused]);
+
+  const handleAbsInput = (raw: string) => {
+    setDisplayValue(raw);
+    const cleaned = raw.replace(/[^0-9-]/g, "").replace(/(?!^)-/g, "");
+    const num = cleaned === "" || cleaned === "-" ? 0 : Number(cleaned);
+    if (mrr > 0) {
+      const newRate = Math.max(min, Math.min(max, num / mrr));
+      onRateChange(newRate);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center justify-between text-sm text-gray-600">
+        <span>{label}</span>
+        <span className="font-medium text-gray-800">{pct(rate)}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={rate}
+        onChange={(e) => onRateChange(Number(e.target.value))}
+        className="w-full"
+      />
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-gray-500 whitespace-nowrap">{absLabel}/{perPeriodLabel}</span>
+        <input
+          type="text"
+          inputMode="numeric"
+          className="border rounded-lg px-2 py-1 text-sm w-full focus:outline-none focus:ring disabled:bg-gray-50 disabled:text-gray-400"
+          value={displayValue}
+          disabled={mrr <= 0}
+          onChange={(e) => handleAbsInput(e.target.value)}
+          onFocus={() => {
+            setIsFocused(true);
+            setDisplayValue(String(Math.round(absValue)));
+          }}
+          onBlur={() => {
+            setIsFocused(false);
+            setDisplayValue(formatAbs(mrr * rate));
+          }}
+        />
+      </div>
+    </div>
   );
 }
 
